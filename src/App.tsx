@@ -37,6 +37,9 @@ import { INITIAL_ESCALATED_CASES } from "./data/mockCases";
 import { EscalatedCase } from "./types";
 import VoiceInput from "./components/VoiceInput";
 import { DiagnosisResult } from "./types";
+import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser } from "firebase/auth";
+import { auth, googleAuthProvider } from "./lib/firebase.ts";
+
 
 // Helper to retrieve premium climate & soil telemetry, matching mock-district-data.json
 const getDistrictPremiumMetrics = (district: any) => {
@@ -143,6 +146,10 @@ export default function App() {
   const [selectedCompareCrops, setSelectedCompareCrops] = useState<string[]>([]);
   const [isDistrictDetailsExpanded, setIsDistrictDetailsExpanded] = useState(false);
 
+  // Firebase Authentication States
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(null);
+
   // RSK Agent Dashboard states
   const [escalatedCases, setEscalatedCases] = useState<EscalatedCase[]>(() => {
     const stored = localStorage.getItem("rsk_escalated_cases");
@@ -172,6 +179,66 @@ export default function App() {
   React.useEffect(() => {
     localStorage.setItem("rsk_escalated_cases", JSON.stringify(escalatedCases));
   }, [escalatedCases]);
+
+  // Track Firebase Auth session and synchronize with Postgres database
+  React.useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      if (currentUser) {
+        setUser(currentUser);
+        const token = await currentUser.getIdToken();
+        setAuthToken(token);
+
+        try {
+          await fetch("/api/register", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${token}`
+            }
+          });
+          console.log("Session successfully verified and synchronized to Cloud SQL.");
+        } catch (err) {
+          console.error("Failed to register session with backend:", err);
+        }
+      } else {
+        setUser(null);
+        setAuthToken(null);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Handle Google Sign-In with robust popup closure catching
+  const handleSignIn = async () => {
+    try {
+      await signInWithPopup(auth, googleAuthProvider);
+    } catch (err: any) {
+      if (err.code === "auth/popup-closed-by-user") {
+        console.warn("Sign-in popup was closed by the user before completion.");
+      } else if (err.code === "auth/cancelled-popup-request") {
+        console.warn("Sign-in popup request was cancelled by a subsequent action.");
+      } else {
+        console.error("Firebase Sign-In Error:", err);
+      }
+    }
+  };
+
+  // Fetch initial escalated cases from Cloud SQL database on mount
+  React.useEffect(() => {
+    const loadCasesFromCloud = async () => {
+      try {
+        const res = await fetch("/api/cases");
+        const data = await res.json();
+        if (data.success && data.cases && data.cases.length > 0) {
+          // Sync state with database truths
+          setEscalatedCases(data.cases);
+        }
+      } catch (err) {
+        console.error("Failed to fetch escalated cases from Cloud SQL:", err);
+      }
+    };
+    loadCasesFromCloud();
+  }, []);
 
   // Auto-escalation trigger: adds cases from the diagnosis flow to the RSK Agent Dashboard
   React.useEffect(() => {
@@ -223,6 +290,18 @@ export default function App() {
             status: "Open",
             advisoryResponse: ""
           };
+
+          // Sync new escalated case to Cloud SQL
+          fetch("/api/cases", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              ...newCase,
+              userUid: auth.currentUser?.uid || null
+            })
+          }).catch(err => console.error("Cloud SQL case auto-escalation sync failed:", err));
 
           return [newCase, ...prev];
         });
@@ -572,6 +651,39 @@ export default function App() {
                 ))}
               </select>
             </div>
+
+            {/* Google Authentication & Cloud Sync Widget */}
+            {user ? (
+              <div className="flex items-center gap-2 bg-emerald-50 border border-emerald-100 rounded-full pl-1.5 pr-3 py-1 text-xs font-bold text-emerald-900 shadow-sm shrink-0" id="auth-user-badge">
+                {user.photoURL ? (
+                  <img src={user.photoURL} alt={user.displayName || "User"} className="w-5 h-5 rounded-full shadow-inner border border-emerald-200" referrerPolicy="no-referrer" />
+                ) : (
+                  <div className="w-5 h-5 rounded-full bg-emerald-800 text-white flex items-center justify-center text-[10px] font-black uppercase shadow-sm">
+                    {user.email ? user.email[0] : "U"}
+                  </div>
+                )}
+                <span className="hidden sm:inline truncate max-w-[120px] font-sans font-medium text-emerald-800">
+                  {user.displayName || user.email}
+                </span>
+                <span className="h-3 w-px bg-emerald-200 hidden sm:inline"></span>
+                <button
+                  onClick={() => signOut(auth)}
+                  className="text-[10px] uppercase font-mono font-black text-emerald-600 hover:text-emerald-950 transition-colors cursor-pointer"
+                  id="auth-logout-btn"
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={handleSignIn}
+                className="flex items-center gap-1.5 bg-emerald-950 text-white hover:bg-emerald-900 border border-transparent rounded-full px-3.5 py-1.5 text-xs font-black transition-all shadow-sm cursor-pointer hover:shadow-md shrink-0 touch-target"
+                id="auth-login-btn"
+              >
+                <Users className="h-3.5 w-3.5 text-brand-gold animate-pulse" />
+                <span>Sign In with Google</span>
+              </button>
+            )}
 
              <div className="flex gap-1 bg-stone-100 p-1 rounded-full text-xs font-bold w-full sm:w-auto justify-center" id="nav-tabs">
               <button
@@ -976,7 +1088,13 @@ export default function App() {
                                 value={activeCase.status}
                                 onChange={(e) => {
                                   const val = e.target.value as any;
-                                  setEscalatedCases(prev => prev.map(c => c.id === activeCase.id ? { ...c, status: val } : c));
+                                  const updatedCase = { ...activeCase, status: val };
+                                  setEscalatedCases(prev => prev.map(c => c.id === activeCase.id ? updatedCase : c));
+                                  fetch("/api/cases", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify(updatedCase)
+                                  }).catch(err => console.error("Cloud SQL status update failed:", err));
                                 }}
                                 className="bg-stone-50 border border-stone-200 rounded-xl px-3 py-1.5 text-xs font-bold font-sans text-stone-800 focus:ring-1 focus:ring-emerald-800 focus:outline-none"
                                 id={`status-selector-${activeCase.id}`}
@@ -1121,11 +1239,19 @@ export default function App() {
                             <div className="flex justify-end gap-3">
                               <button
                                 onClick={() => {
-                                  setEscalatedCases(prev => prev.map(c => c.id === activeCase.id ? { 
-                                    ...c, 
-                                    status: "Responded",
+                                  const updatedCase = {
+                                    ...activeCase,
+                                    status: "Responded" as const,
                                     advisoryResponse: activeCase.advisoryResponse || "Please follow standard localized treatment guidelines."
-                                  } : c));
+                                  };
+                                  setEscalatedCases(prev => prev.map(c => c.id === activeCase.id ? updatedCase : c));
+                                  
+                                  fetch("/api/cases", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify(updatedCase)
+                                  }).catch(err => console.error("Cloud SQL advisory dispatch sync failed:", err));
+
                                   setAgentSuccessMessage(`Official treatment advisory dispatched successfully to ${activeCase.farmerName} via automated SMS broadcast.`);
                                   setTimeout(() => setAgentSuccessMessage(null), 5000);
                                 }}

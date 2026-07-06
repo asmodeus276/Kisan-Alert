@@ -5,6 +5,11 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
 import fs from "fs/promises";
+import { db } from "./src/db/index.ts";
+import { users, escalatedCases } from "./src/db/schema.ts";
+import { eq } from "drizzle-orm";
+import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
+
 
 // Load environment variables
 dotenv.config();
@@ -359,6 +364,119 @@ app.post("/api/send-alert", async (req, res) => {
       error: "Internal server error while sending SMS alert.",
       details: error.message || "Unknown error"
     });
+  }
+});
+
+// ============================================================================
+// CLOUD SQL DATABASE SYNC ENDPOINTS:
+// ============================================================================
+
+// 1. Session Registration: Synchronizes authenticated Firebase users in Postgres
+app.post("/api/register", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userUid = req.user!.uid;
+    const userEmail = req.user!.email || "";
+
+    // Sync user session details to Cloud SQL
+    const syncedUser = await db.insert(users)
+      .values({
+        uid: userUid,
+        email: userEmail,
+      })
+      .onConflictDoUpdate({
+        target: users.uid,
+        set: { email: userEmail },
+      })
+      .returning();
+
+    return res.json({ success: true, user: syncedUser[0] });
+  } catch (error: any) {
+    console.error("User registration sync failed:", error);
+    return res.status(500).json({ error: "Failed to synchronize user session." });
+  }
+});
+
+// 2. Fetch All Cases: Retrieves full list of farmer diagnostic cases from Cloud SQL
+app.get("/api/cases", async (req, res) => {
+  try {
+    const casesList = await db.select().from(escalatedCases);
+    return res.json({ success: true, cases: casesList });
+  } catch (error: any) {
+    console.error("Fetch cases failed:", error);
+    return res.status(500).json({ error: "Failed to load escalated cases from Cloud SQL." });
+  }
+});
+
+// 3. Upsert Case: Saves new diagnostic reports or updates existing agent responses
+app.post("/api/cases", async (req, res) => {
+  try {
+    const {
+      id,
+      districtId,
+      farmerName,
+      village,
+      cropName,
+      photoThumbnail,
+      diagnosis,
+      symptomDescription,
+      voiceTranscript,
+      submissionTime,
+      status,
+      advisoryResponse,
+      userUid
+    } = req.body;
+
+    if (!id) {
+      return res.status(400).json({ error: "Case ID is required." });
+    }
+
+    // Lookup corresponding primary key of user if they are logged in
+    let dbUserId: number | null = null;
+    if (userUid) {
+      const existingUsers = await db.select().from(users).where(eq(users.uid, userUid));
+      if (existingUsers.length > 0) {
+        dbUserId = existingUsers[0].id;
+      }
+    }
+
+    // Insert or update case details in Cloud SQL
+    const upserted = await db.insert(escalatedCases)
+      .values({
+        id,
+        userId: dbUserId,
+        districtId,
+        farmerName,
+        village,
+        cropName,
+        photoThumbnail,
+        diagnosis,
+        symptomDescription,
+        voiceTranscript,
+        submissionTime,
+        status,
+        advisoryResponse,
+      })
+      .onConflictDoUpdate({
+        target: escalatedCases.id,
+        set: {
+          status,
+          advisoryResponse,
+          farmerName,
+          village,
+          cropName,
+          photoThumbnail,
+          diagnosis,
+          symptomDescription,
+          voiceTranscript,
+          submissionTime,
+        }
+      })
+      .returning();
+
+    return res.json({ success: true, case: upserted[0] });
+  } catch (error: any) {
+    console.error("Upsert case failed:", error);
+    return res.status(500).json({ error: "Failed to sync escalated case to Cloud SQL." });
   }
 });
 
