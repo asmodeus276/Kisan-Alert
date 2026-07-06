@@ -1,0 +1,6 @@
+{
+  "name": "Kisan Alert",
+  "description": "A mobile-first crop health advisory and plant pathology application for Indian farmers, powered by Gemini.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

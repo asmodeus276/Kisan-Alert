@@ -1,0 +1,48 @@
+{
+  "district": "Warangal",
+  "state": "Telangana",
+  "season": "Kharif",
+  "ndvi": {
+    "value": 0.42,
+    "label": "Moderate stress",
+    "source": "ISRO Bhuvan (mock)",
+    "last_updated": "2026-07-04"
+  },
+  "soil": {
+    "type": "Red loamy",
+    "ph": 6.4,
+    "n_level": "Medium",
+    "p_level": "Low",
+    "k_level": "Medium"
+  },
+  "groundwater_depth_m": 8.2,
+  "weather_forecast_7day": [
+    { "date": "2026-07-06", "rain_mm": 0, "temp_c": 34, "humidity_pct": 58 },
+    { "date": "2026-07-07", "rain_mm": 0, "temp_c": 35, "humidity_pct": 55 },
+    { "date": "2026-07-08", "rain_mm": 2, "temp_c": 33, "humidity_pct": 62 },
+    { "date": "2026-07-09", "rain_mm": 0, "temp_c": 36, "humidity_pct": 50 },
+    { "date": "2026-07-10", "rain_mm": 0, "temp_c": 36, "humidity_pct": 48 },
+    { "date": "2026-07-11", "rain_mm": 0, "temp_c": 37, "humidity_pct": 45 },
+    { "date": "2026-07-12", "rain_mm": 0, "temp_c": 37, "humidity_pct": 44 }
+  ],
+  "active_alerts": [
+    {
+      "id": "alert_001",
+      "alert_type": "dry_spell",
+      "crop_name": "wheat",
+      "severity": "High",
+      "message_en": "5 consecutive dry days detected. Soil moisture critical.",
+      "action_required": "Irrigate wheat field within 2 days",
+      "dispatched_at": "2026-07-06T04:00:00Z"
+    },
+    {
+      "id": "alert_002",
+      "alert_type": "pest_risk",
+      "crop_name": "cotton",
+      "severity": "Medium",
+      "message_en": "Rising humidity increases pink bollworm risk.",
+      "action_required": "Inspect cotton bolls this week; consider pheromone traps",
+      "dispatched_at": "2026-07-05T10:00:00Z"
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+@import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400..700;1,400..700&family=IBM+Plex+Sans:ital,wght@0,300..700;1,300..700&family=IBM+Plex+Mono:ital,wght@0,400..700;1,400..700&display=swap');
+
+@import "tailwindcss";
+
+@theme {
+  --font-serif: "Lora", Georgia, serif;
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+  
+  --color-brand-navy: #1B3358;
+  --color-brand-cream: #F6F3EA;
+  --color-brand-gold: #C89B3C;
+  --color-brand-amber: #EFD9A0;
+  --color-brand-brick: #BD4F32;
+  --color-brand-green: #4C7A3D;
+}
+
+/* Custom animation for ticker */
+@keyframes ticker {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-ticker {
+  display: inline-block;
+  animation: ticker 25s linear infinite;
+}
+
+/* Standard focus styles and touch target styling */
+.touch-target {
+  min-height: 44px;
+  min-width: 44px;
+}
