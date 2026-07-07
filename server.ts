@@ -41,22 +41,28 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: "25mb" }));
 app.use(express.urlencoded({ limit: "25mb", extended: true }));
 
-// Initialize the modern @google/genai SDK
-const apiKey = process.env.GEMINI_API_KEY;
+// Initialize the modern @google/genai SDK using lazy-initialization for hot-reload of secrets
+let _ai: GoogleGenAI | null = null;
+let _lastApiKey: string | undefined = undefined;
 
-// Check if the key is present
-if (!apiKey) {
-  console.warn("⚠️ Warning: GEMINI_API_KEY environment variable is not defined.");
+function getAi(): GoogleGenAI {
+  const currentKey = process.env.GEMINI_API_KEY || "";
+  if (!_ai || _lastApiKey !== currentKey) {
+    if (!currentKey) {
+      console.warn("⚠️ Warning: GEMINI_API_KEY is requested but currently undefined or empty.");
+    }
+    _lastApiKey = currentKey;
+    _ai = new GoogleGenAI({
+      apiKey: currentKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    });
+  }
+  return _ai;
 }
-
-const ai = new GoogleGenAI({
-  apiKey: apiKey || "",
-  httpOptions: {
-    headers: {
-      "User-Agent": "aistudio-build",
-    },
-  },
-});
 
 // Crop Pathology API Endpoint
 app.post("/api/analyze", async (req, res) => {
@@ -215,7 +221,7 @@ No preamble, no markdown formatting, JSON only.`;
     }
 
     // Call the Gemini 3.5 Flash model with a strict JSON schema
-    const response = await ai.models.generateContent({
+    const response = await getAi().models.generateContent({
       model: "gemini-3.5-flash",
       contents: { parts },
       config: {
@@ -709,7 +715,7 @@ ${JSON.stringify(districtData, null, 2)}
 
 Provide recommendations matching the requested schema. Make sure the 'explanation_local' is in Hindi (written in Devanagari script).`;
 
-    const response = await ai.models.generateContent({
+    const response = await getAi().models.generateContent({
       model: "gemini-3.5-flash",
       contents: prompt,
       config: {

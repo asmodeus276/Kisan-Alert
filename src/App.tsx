@@ -159,6 +159,7 @@ export default function App() {
   // Firebase Authentication States
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   // RSK Agent Dashboard states
   const [escalatedCases, setEscalatedCases] = useState<EscalatedCase[]>(() => {
@@ -219,17 +220,26 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Handle Google Sign-In with robust popup closure catching
+  // Handle Google Sign-In with robust popup closure catching and domain verification guides
   const handleSignIn = async () => {
+    setAuthError(null);
     try {
       await signInWithPopup(auth, googleAuthProvider);
     } catch (err: any) {
       if (err.code === "auth/popup-closed-by-user") {
         console.warn("Sign-in popup was closed by the user before completion.");
+        setAuthError("Sign-in popup was closed before completion. Please try again.");
       } else if (err.code === "auth/cancelled-popup-request") {
         console.warn("Sign-in popup request was cancelled by a subsequent action.");
+      } else if (err.code === "auth/unauthorized-domain") {
+        console.error("Firebase Sign-In Error (unauthorized-domain):", err);
+        setAuthError(`Domain Not Authorized: This domain (${window.location.hostname}) has not been whitelisted in the Firebase Console. Go to: Firebase Console > Authentication > Settings > Authorized domains, and add "${window.location.hostname}" to allow Google Sign-In to function.`);
+      } else if (err.code === "auth/popup-blocked") {
+        console.warn("Sign-in popup was blocked by the browser.");
+        setAuthError("The sign-in popup was blocked by your browser. Please allow popups for this site and click Sign In again.");
       } else {
         console.error("Firebase Sign-In Error:", err);
+        setAuthError(err.message || "An unexpected error occurred during Google Sign-In.");
       }
     }
   };
@@ -788,6 +798,26 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Auth error notification banner */}
+      {authError && (
+        <div className="bg-rose-50 border-b border-rose-200 px-6 py-4 animate-fade-in shrink-0" id="auth-error-banner">
+          <div className="max-w-7xl mx-auto flex gap-3 items-start">
+            <AlertTriangle className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <h4 className="text-sm font-bold text-rose-950 font-sans">Google Sign-In Alert</h4>
+              <p className="text-xs text-rose-800 mt-1 font-medium leading-relaxed">{authError}</p>
+            </div>
+            <button 
+              onClick={() => setAuthError(null)}
+              className="text-xs font-mono font-bold text-rose-600 hover:text-rose-950 px-2.5 py-1 rounded border border-rose-200 hover:bg-rose-100 transition-colors cursor-pointer shrink-0"
+              id="dismiss-auth-error-btn"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* 3. BENTO MAIN CONTAINER */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6" id="main-content-layout">
