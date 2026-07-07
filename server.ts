@@ -1,24 +1,41 @@
+import dotenv from "dotenv";
+// Load environment variables immediately so they are available to subsequent imports
+dotenv.config();
+
 import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
-import dotenv from "dotenv";
 import fs from "fs/promises";
 import { db } from "./src/db/index.ts";
 import { users, escalatedCases } from "./src/db/schema.ts";
 import { eq } from "drizzle-orm";
 import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
+import {
+  isSupabaseConfigured,
+  syncUserToSupabase,
+  getSupabaseCases,
+  upsertCaseToSupabase,
+} from "./src/db/supabase.ts";
 
-
-// Load environment variables
-dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = 3000;
+
+// Enable Cross-Origin Resource Sharing (CORS) for external frontends like Netlify
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
 // Configure body parsing with a higher limit to accommodate base64 crop photos
 app.use(express.json({ limit: "25mb" }));
@@ -371,39 +388,63 @@ app.post("/api/send-alert", async (req, res) => {
 // CLOUD SQL DATABASE SYNC ENDPOINTS:
 // ============================================================================
 
-// 1. Session Registration: Synchronizes authenticated Firebase users in Postgres
+// 1. Session Registration: Synchronizes authenticated Firebase users in Postgres or Supabase
 app.post("/api/register", requireAuth, async (req: AuthRequest, res) => {
   try {
     const userUid = req.user!.uid;
     const userEmail = req.user!.email || "";
 
-    // Sync user session details to Cloud SQL
-    const syncedUser = await db.insert(users)
-      .values({
-        uid: userUid,
-        email: userEmail,
-      })
-      .onConflictDoUpdate({
-        target: users.uid,
-        set: { email: userEmail },
-      })
-      .returning();
+    if (isSupabaseConfigured()) {
+      const user = await syncUserToSupabase(userUid, userEmail);
+      return res.json({ success: true, user });
+    }
 
-    return res.json({ success: true, user: syncedUser[0] });
+    try {
+      // Sync user session details to Cloud SQL
+      const syncedUser = await db.insert(users)
+        .values({
+          uid: userUid,
+          email: userEmail,
+        })
+        .onConflictDoUpdate({
+          target: users.uid,
+          set: { email: userEmail },
+        })
+        .returning();
+
+      return res.json({ success: true, user: syncedUser[0] });
+    } catch (dbErr: any) {
+      console.warn("Drizzle user registration sync failed, falling back to local session:", dbErr.message);
+      return res.json({ success: true, user: { uid: userUid, email: userEmail }, databaseError: true });
+    }
   } catch (error: any) {
     console.error("User registration sync failed:", error);
     return res.status(500).json({ error: "Failed to synchronize user session." });
   }
 });
 
-// 2. Fetch All Cases: Retrieves full list of farmer diagnostic cases from Cloud SQL
+// 2. Fetch All Cases: Retrieves full list of farmer diagnostic cases from Cloud SQL or Supabase
 app.get("/api/cases", async (req, res) => {
   try {
-    const casesList = await db.select().from(escalatedCases);
-    return res.json({ success: true, cases: casesList });
+    if (isSupabaseConfigured()) {
+      const result = await getSupabaseCases();
+      return res.json({ 
+        success: true, 
+        cases: result.cases, 
+        tablesNotCreated: result.tablesNotCreated 
+      });
+    }
+
+    try {
+      const casesList = await db.select().from(escalatedCases);
+      return res.json({ success: true, cases: casesList });
+    } catch (dbErr: any) {
+      console.warn("Drizzle database select failed, falling back to empty list:", dbErr.message);
+      return res.json({ success: true, cases: [], databaseError: true });
+    }
   } catch (error: any) {
     console.error("Fetch cases failed:", error);
-    return res.status(500).json({ error: "Failed to load escalated cases from Cloud SQL." });
+    return res.status(500).json({ error: "Failed to load escalated cases." });
   }
 });
 
@@ -430,20 +471,9 @@ app.post("/api/cases", async (req, res) => {
       return res.status(400).json({ error: "Case ID is required." });
     }
 
-    // Lookup corresponding primary key of user if they are logged in
-    let dbUserId: number | null = null;
-    if (userUid) {
-      const existingUsers = await db.select().from(users).where(eq(users.uid, userUid));
-      if (existingUsers.length > 0) {
-        dbUserId = existingUsers[0].id;
-      }
-    }
-
-    // Insert or update case details in Cloud SQL
-    const upserted = await db.insert(escalatedCases)
-      .values({
+    if (isSupabaseConfigured()) {
+      const syncedCase = await upsertCaseToSupabase({
         id,
-        userId: dbUserId,
         districtId,
         farmerName,
         village,
@@ -455,12 +485,27 @@ app.post("/api/cases", async (req, res) => {
         submissionTime,
         status,
         advisoryResponse,
-      })
-      .onConflictDoUpdate({
-        target: escalatedCases.id,
-        set: {
-          status,
-          advisoryResponse,
+        userUid
+      });
+      return res.json({ success: true, case: syncedCase });
+    }
+
+    try {
+      // Lookup corresponding primary key of user if they are logged in
+      let dbUserId: number | null = null;
+      if (userUid) {
+        const existingUsers = await db.select().from(users).where(eq(users.uid, userUid));
+        if (existingUsers.length > 0) {
+          dbUserId = existingUsers[0].id;
+        }
+      }
+
+      // Insert or update case details in Cloud SQL
+      const upserted = await db.insert(escalatedCases)
+        .values({
+          id,
+          userId: dbUserId,
+          districtId,
           farmerName,
           village,
           cropName,
@@ -469,14 +514,51 @@ app.post("/api/cases", async (req, res) => {
           symptomDescription,
           voiceTranscript,
           submissionTime,
-        }
-      })
-      .returning();
+          status,
+          advisoryResponse,
+        })
+        .onConflictDoUpdate({
+          target: escalatedCases.id,
+          set: {
+            status,
+            advisoryResponse,
+            farmerName,
+            village,
+            cropName,
+            photoThumbnail,
+            diagnosis,
+            symptomDescription,
+            voiceTranscript,
+            submissionTime,
+          }
+        })
+        .returning();
 
-    return res.json({ success: true, case: upserted[0] });
+      return res.json({ success: true, case: upserted[0] });
+    } catch (dbErr: any) {
+      console.warn("Drizzle database upsert failed, falling back to local-only:", dbErr.message);
+      // Return the payload with a databaseError flag
+      const mockSynced = {
+        id,
+        userId: null,
+        districtId,
+        farmerName,
+        village,
+        cropName,
+        photoThumbnail,
+        diagnosis,
+        symptomDescription,
+        voiceTranscript,
+        submissionTime,
+        status,
+        advisoryResponse,
+        createdAt: new Date().toISOString()
+      };
+      return res.json({ success: true, case: mockSynced, databaseError: true });
+    }
   } catch (error: any) {
     console.error("Upsert case failed:", error);
-    return res.status(500).json({ error: "Failed to sync escalated case to Cloud SQL." });
+    return res.status(500).json({ error: "Failed to sync escalated case." });
   }
 });
 

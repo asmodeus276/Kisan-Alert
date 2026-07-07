@@ -30,7 +30,8 @@ import {
   Check,
   MessageSquare,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Database
 } from "lucide-react";
 import { SAMPLE_CROPS, DISTRICTS, SampleCrop } from "./data/samples";
 import { INITIAL_ESCALATED_CASES } from "./data/mockCases";
@@ -39,6 +40,10 @@ import VoiceInput from "./components/VoiceInput";
 import { DiagnosisResult } from "./types";
 import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser } from "firebase/auth";
 import { auth, googleAuthProvider } from "./lib/firebase.ts";
+
+// Get backend base URL from environment variables for Netlify/external deployments, avoiding misconfigured Supabase URLs
+const rawBackendUrl = import.meta.env.VITE_BACKEND_URL || "";
+const BACKEND_URL = rawBackendUrl.includes("supabase.co") ? "" : rawBackendUrl;
 
 
 // Helper to retrieve premium climate & soil telemetry, matching mock-district-data.json
@@ -89,25 +94,30 @@ export default function App() {
 
   React.useEffect(() => {
     let active = true;
-    const fetchWeather = async () => {
+    const fetchWeather = async (retries = 3, delay = 1500) => {
       setIsWeatherLoading(true);
-      try {
-        const res = await fetch(`/api/weather?districtId=${selectedDistrictId}`);
-        if (res.ok && active) {
-          const data = await res.json();
-          if (data.success && data.weather_forecast_7day) {
-            setLiveWeatherForecast(data.weather_forecast_7day);
-            setIsWeatherLoading(false);
-            return;
+      for (let i = 0; i < retries; i++) {
+        try {
+          const res = await fetch(`${BACKEND_URL}/api/weather?districtId=${selectedDistrictId}`);
+          if (res.ok && active) {
+            const data = await res.json();
+            if (data.success && data.weather_forecast_7day) {
+              setLiveWeatherForecast(data.weather_forecast_7day);
+              setIsWeatherLoading(false);
+              return;
+            }
+          }
+        } catch (err) {
+          console.warn(`Attempt ${i + 1} to fetch weather failed:`, err);
+          if (i < retries - 1 && active) {
+            await new Promise((resolve) => setTimeout(resolve, delay));
           }
         }
-      } catch (err) {
-        console.warn("Error fetching live weather:", err);
       }
       if (active) {
         setLiveWeatherForecast(null);
+        setIsWeatherLoading(false);
       }
-      setIsWeatherLoading(false);
     };
 
     fetchWeather();
@@ -162,6 +172,7 @@ export default function App() {
   const [callDuration, setCallDuration] = useState(0);
   const [callTimer, setCallTimer] = useState<NodeJS.Timeout | null>(null);
   const [agentSuccessMessage, setAgentSuccessMessage] = useState<string | null>(null);
+  const [supabaseTablesNotCreated, setSupabaseTablesNotCreated] = useState<boolean>(false);
   
   // Alerts delivery and phone state tracking
   const [phoneNumbers, setPhoneNumbers] = useState<Record<string, string>>({});
@@ -189,7 +200,7 @@ export default function App() {
         setAuthToken(token);
 
         try {
-          await fetch("/api/register", {
+          await fetch(`${BACKEND_URL}/api/register`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -225,19 +236,39 @@ export default function App() {
 
   // Fetch initial escalated cases from Cloud SQL database on mount
   React.useEffect(() => {
-    const loadCasesFromCloud = async () => {
-      try {
-        const res = await fetch("/api/cases");
-        const data = await res.json();
-        if (data.success && data.cases && data.cases.length > 0) {
-          // Sync state with database truths
-          setEscalatedCases(data.cases);
+    let active = true;
+    const loadCasesFromCloud = async (retries = 3, delay = 1500) => {
+      for (let i = 0; i < retries; i++) {
+        try {
+          const res = await fetch(`${BACKEND_URL}/api/cases`);
+          if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+          const data = await res.json();
+          if (active && data.success) {
+            if (data.cases && data.cases.length > 0) {
+              // Sync state with database truths
+              setEscalatedCases(data.cases);
+            }
+            if (data.tablesNotCreated) {
+              setSupabaseTablesNotCreated(true);
+            } else {
+              setSupabaseTablesNotCreated(false);
+            }
+            return; // Success!
+          }
+        } catch (err) {
+          console.warn(`Attempt ${i + 1} to load cases failed:`, err);
+          if (i < retries - 1 && active) {
+            await new Promise((resolve) => setTimeout(resolve, delay));
+          } else {
+            console.error("Failed to fetch escalated cases from Cloud SQL after retries:", err);
+          }
         }
-      } catch (err) {
-        console.error("Failed to fetch escalated cases from Cloud SQL:", err);
       }
     };
     loadCasesFromCloud();
+    return () => {
+      active = false;
+    };
   }, []);
 
   // Auto-escalation trigger: adds cases from the diagnosis flow to the RSK Agent Dashboard
@@ -292,7 +323,7 @@ export default function App() {
           };
 
           // Sync new escalated case to Cloud SQL
-          fetch("/api/cases", {
+          fetch(`${BACKEND_URL}/api/cases`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json"
@@ -413,7 +444,7 @@ export default function App() {
     stopSpeaking();
 
     try {
-      const response = await fetch("/api/analyze", {
+      const response = await fetch(`${BACKEND_URL}/api/analyze`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -492,7 +523,7 @@ export default function App() {
     setIsRecLoading(true);
     setRecError(null);
     try {
-      const res = await fetch("/api/crop-recommendations");
+      const res = await fetch(`${BACKEND_URL}/api/crop-recommendations`);
       if (!res.ok) {
         throw new Error("Failed to load crop recommendations.");
       }
@@ -534,7 +565,7 @@ export default function App() {
     }));
 
     try {
-      const response = await fetch("/api/send-alert", {
+      const response = await fetch(`${BACKEND_URL}/api/send-alert`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -838,6 +869,68 @@ export default function App() {
                     </div>
                   )}
 
+                  {/* SUPABASE CONFIGURATION HELPER BANNER */}
+                  {supabaseTablesNotCreated && (
+                    <div className="bg-gradient-to-r from-indigo-50 to-blue-50 border border-blue-200 rounded-2xl p-5 shadow-sm space-y-4 animate-fade-in" id="supabase-setup-helper-banner">
+                      <div className="flex items-start gap-3">
+                        <div className="p-2.5 bg-blue-600 text-white rounded-xl shrink-0">
+                          <Database className="h-5 w-5" />
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-bold text-slate-900">🔌 Supabase Connected! SQL Setup Required</h4>
+                          <p className="text-xs text-slate-600 mt-1">
+                            Your Kisan Alert application is connected to Supabase project <code className="bg-white px-1.5 py-0.5 rounded border border-slate-200 font-mono text-[11px] font-bold text-indigo-700">ocempzeupuhgtqwhjmtx</code>! However, the database tables do not exist yet. Please run this SQL script in your Supabase SQL Editor.
+                          </p>
+                        </div>
+                      </div>
+                      
+                      <div className="bg-slate-950 rounded-xl p-4 relative font-mono text-xs text-emerald-400 overflow-x-auto max-h-60 shadow-inner">
+                        <div className="absolute top-3 right-3 flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              const sql = `-- Create users table\nCREATE TABLE IF NOT EXISTS users (\n  id SERIAL PRIMARY KEY,\n  uid TEXT NOT NULL UNIQUE,\n  email TEXT NOT NULL,\n  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n);\n\n-- Create escalated_cases table\nCREATE TABLE IF NOT EXISTS escalated_cases (\n  id TEXT PRIMARY KEY,\n  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,\n  district_id TEXT NOT NULL,\n  farmer_name TEXT NOT NULL,\n  village TEXT NOT NULL,\n  crop_name TEXT NOT NULL,\n  photo_thumbnail TEXT NOT NULL,\n  diagnosis JSONB NOT NULL,\n  symptom_description TEXT NOT NULL,\n  voice_transcript TEXT,\n  submission_time TEXT NOT NULL,\n  status TEXT NOT NULL DEFAULT 'Open',\n  advisory_response TEXT NOT NULL DEFAULT '',\n  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()\n);`;
+                              navigator.clipboard.writeText(sql);
+                              alert("SQL Schema copied to clipboard!");
+                            }}
+                            className="bg-white/10 hover:bg-white/20 text-white rounded-lg px-2.5 py-1 text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer"
+                          >
+                            <span>Copy SQL Schema</span>
+                          </button>
+                        </div>
+                        <pre className="text-[11px] leading-relaxed text-left">
+{`-- Create users table
+CREATE TABLE IF NOT EXISTS users (
+  id SERIAL PRIMARY KEY,
+  uid TEXT NOT NULL UNIQUE,
+  email TEXT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Create escalated_cases table
+CREATE TABLE IF NOT EXISTS escalated_cases (
+  id TEXT PRIMARY KEY,
+  user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  district_id TEXT NOT NULL,
+  farmer_name TEXT NOT NULL,
+  village TEXT NOT NULL,
+  crop_name TEXT NOT NULL,
+  photo_thumbnail TEXT NOT NULL,
+  diagnosis JSONB NOT NULL,
+  symptom_description TEXT NOT NULL,
+  voice_transcript TEXT,
+  submission_time TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'Open',
+  advisory_response TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);`}
+                        </pre>
+                      </div>
+                      <div className="text-[11px] text-slate-500 italic">
+                        Once you run this query in your Supabase Dashboard, refresh this page to instantly synchronize real-time diagnostics!
+                      </div>
+                    </div>
+                  )}
+
                   {/* THREE ANALYTICS CARDS */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-4" id="rsk-analytics-grid">
                     {/* CARD 1: TOTAL CASES */}
@@ -1090,7 +1183,7 @@ export default function App() {
                                   const val = e.target.value as any;
                                   const updatedCase = { ...activeCase, status: val };
                                   setEscalatedCases(prev => prev.map(c => c.id === activeCase.id ? updatedCase : c));
-                                  fetch("/api/cases", {
+                                  fetch(`${BACKEND_URL}/api/cases`, {
                                     method: "POST",
                                     headers: { "Content-Type": "application/json" },
                                     body: JSON.stringify(updatedCase)
@@ -1246,7 +1339,7 @@ export default function App() {
                                   };
                                   setEscalatedCases(prev => prev.map(c => c.id === activeCase.id ? updatedCase : c));
                                   
-                                  fetch("/api/cases", {
+                                  fetch(`${BACKEND_URL}/api/cases`, {
                                     method: "POST",
                                     headers: { "Content-Type": "application/json" },
                                     body: JSON.stringify(updatedCase)

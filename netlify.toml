@@ -1,0 +1,21 @@
+# Netlify configuration file for Kisan Alert (React + Vite Frontend)
+# This file configures the build settings and SPA redirect rules.
+
+[build]
+  # Build the frontend and place it in the dist/ folder
+  command = "npm run build"
+  publish = "dist"
+
+[[redirects]]
+  # Redirect all client-side router requests to index.html for Single Page Application routing
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+# OPTIONAL BACKEND PROXY (If deploying frontend on Netlify and backend on Render/Cloud Run/Railway)
+# Un-comment the section below and replace the 'to' URL with your actual deployed Express backend URL:
+# [[redirects]]
+#   from = "/api/*"
+#   to = "https://your-backend-api-url.com/api/:splat"
+#   status = 200
+#   force = true
