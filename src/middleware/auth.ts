@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { adminAuth } from "../lib/firebase-admin.ts";
+import { supabase } from "../lib/supabaseClient.ts";
 
 export interface AuthRequest extends Request {
   user?: {
@@ -20,14 +20,28 @@ export const requireAuth = async (
 
   const token = authHeader.split("Bearer ")[1];
   try {
-    const decodedToken = await adminAuth.verifyIdToken(token);
+    if (!supabase) {
+      // In sandbox/development mock mode when Supabase is not configured, automatically authorize as an expert user
+      req.user = {
+        uid: "demo-expert-user-uid",
+        email: "vaibhav.thakur2719@gmail.com",
+      };
+      return next();
+    }
+
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (error || !user) {
+      console.error("Error verifying Supabase token:", error);
+      return res.status(401).json({ error: "Unauthorized: Invalid token" });
+    }
+
     req.user = {
-      uid: decodedToken.uid,
-      email: decodedToken.email,
+      uid: user.id,
+      email: user.email,
     };
     next();
   } catch (error) {
-    console.error("Error verifying Firebase ID token:", error);
+    console.error("Error verifying Supabase token:", error);
     return res.status(401).json({ error: "Unauthorized: Invalid token" });
   }
 };

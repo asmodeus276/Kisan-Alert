@@ -1,26 +1,38 @@
-import { createClient } from "@supabase/supabase-js";
+import { supabase, isSupabaseConfigured } from "../lib/supabaseClient.ts";
 
-const supabaseUrl = process.env.SUPABASE_URL || "";
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
-
-// Initialize Supabase Client
-export const supabase = (supabaseUrl && supabaseAnonKey)
-  ? createClient(supabaseUrl, supabaseAnonKey)
-  : null;
-
-/**
- * Checks if Supabase has been configured with valid credentials.
- */
-export const isSupabaseConfigured = (): boolean => {
-  return !!supabase;
-};
+// Server-side in-memory mock database fallback when Supabase is not configured
+const inMemoryUsers: Array<{ id: number; uid: string; email: string }> = [];
+const inMemoryCases: Array<{
+  id: string;
+  user_id: number | null;
+  district_id: string;
+  farmer_name: string;
+  village: string;
+  crop_name: string;
+  photo_thumbnail: string;
+  diagnosis: string;
+  symptom_description: string;
+  voice_transcript: string | null;
+  submission_time: string;
+  status: string;
+  advisory_response: string;
+  created_at: string;
+}> = [];
 
 /**
  * Automatically synchronizes a logged-in user to the Supabase users table.
  */
 export async function syncUserToSupabase(uid: string, email: string) {
   if (!supabase) {
-    throw new Error("Supabase is not configured.");
+    console.warn("⚠️ Supabase is not configured. Running user sync in local mock server database mode.");
+    let existing = inMemoryUsers.find(u => u.uid === uid);
+    if (!existing) {
+      existing = { id: inMemoryUsers.length + 1, uid, email };
+      inMemoryUsers.push(existing);
+    } else {
+      existing.email = email;
+    }
+    return existing;
   }
 
   try {
@@ -70,7 +82,27 @@ export async function syncUserToSupabase(uid: string, email: string) {
  */
 export async function getSupabaseCases() {
   if (!supabase) {
-    throw new Error("Supabase is not configured.");
+    console.warn("⚠️ Supabase is not configured. Returning local mock server diagnostic cases.");
+    const cases = inMemoryCases.map(item => ({
+      id: item.id,
+      userId: item.user_id,
+      districtId: item.district_id,
+      farmerName: item.farmer_name,
+      village: item.village,
+      cropName: item.crop_name,
+      photoThumbnail: item.photo_thumbnail,
+      diagnosis: item.diagnosis,
+      symptomDescription: item.symptom_description,
+      voiceTranscript: item.voice_transcript,
+      submissionTime: item.submission_time,
+      status: item.status,
+      advisoryResponse: item.advisory_response,
+      createdAt: item.created_at,
+    }));
+    return {
+      cases,
+      tablesNotCreated: false
+    };
   }
 
   try {
@@ -142,7 +174,55 @@ export async function getSupabaseCases() {
  */
 export async function upsertCaseToSupabase(caseData: any) {
   if (!supabase) {
-    throw new Error("Supabase is not configured.");
+    console.warn("⚠️ Supabase is not configured. Upserting case into local mock server database.");
+    let dbUserId: number | null = null;
+    if (caseData.userUid) {
+      const u = inMemoryUsers.find(x => x.uid === caseData.userUid);
+      if (u) dbUserId = u.id;
+    } else if (caseData.userId) {
+      dbUserId = caseData.userId;
+    }
+
+    const index = inMemoryCases.findIndex(c => c.id === caseData.id);
+    const item = {
+      id: caseData.id,
+      user_id: dbUserId,
+      district_id: caseData.districtId,
+      farmer_name: caseData.farmerName,
+      village: caseData.village,
+      crop_name: caseData.cropName,
+      photo_thumbnail: caseData.photoThumbnail,
+      diagnosis: caseData.diagnosis,
+      symptom_description: caseData.symptomDescription,
+      voice_transcript: caseData.voiceTranscript || null,
+      submission_time: caseData.submissionTime,
+      status: caseData.status || "Open",
+      advisory_response: caseData.advisoryResponse || "",
+      created_at: index >= 0 ? inMemoryCases[index].created_at : new Date().toISOString()
+    };
+
+    if (index >= 0) {
+      inMemoryCases[index] = item;
+    } else {
+      inMemoryCases.push(item);
+    }
+
+    return {
+      id: item.id,
+      userId: item.user_id,
+      districtId: item.district_id,
+      farmerName: item.farmer_name,
+      village: item.village,
+      cropName: item.crop_name,
+      photoThumbnail: item.photo_thumbnail,
+      diagnosis: item.diagnosis,
+      symptomDescription: item.symptom_description,
+      voiceTranscript: item.voice_transcript,
+      submissionTime: item.submission_time,
+      status: item.status,
+      advisoryResponse: item.advisory_response,
+      createdAt: item.created_at,
+    };
   }
 
   try {

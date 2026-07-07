@@ -8,12 +8,8 @@ import { fileURLToPath } from "url";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import fs from "fs/promises";
-import { db } from "./src/db/index.ts";
-import { users, escalatedCases } from "./src/db/schema.ts";
-import { eq } from "drizzle-orm";
 import { requireAuth, AuthRequest } from "./src/middleware/auth.ts";
 import {
-  isSupabaseConfigured,
   syncUserToSupabase,
   getSupabaseCases,
   upsertCaseToSupabase,
@@ -391,70 +387,39 @@ app.post("/api/send-alert", async (req, res) => {
 });
 
 // ============================================================================
-// CLOUD SQL DATABASE SYNC ENDPOINTS:
+// SUPABASE DATABASE SYNC ENDPOINTS:
 // ============================================================================
 
-// 1. Session Registration: Synchronizes authenticated Firebase users in Postgres or Supabase
+// 1. Session Registration: Synchronizes authenticated users in Supabase
 app.post("/api/register", requireAuth, async (req: AuthRequest, res) => {
   try {
     const userUid = req.user!.uid;
     const userEmail = req.user!.email || "";
 
-    if (isSupabaseConfigured()) {
-      const user = await syncUserToSupabase(userUid, userEmail);
-      return res.json({ success: true, user });
-    }
-
-    try {
-      // Sync user session details to Cloud SQL
-      const syncedUser = await db.insert(users)
-        .values({
-          uid: userUid,
-          email: userEmail,
-        })
-        .onConflictDoUpdate({
-          target: users.uid,
-          set: { email: userEmail },
-        })
-        .returning();
-
-      return res.json({ success: true, user: syncedUser[0] });
-    } catch (dbErr: any) {
-      console.warn("Drizzle user registration sync failed, falling back to local session:", dbErr.message);
-      return res.json({ success: true, user: { uid: userUid, email: userEmail }, databaseError: true });
-    }
+    const user = await syncUserToSupabase(userUid, userEmail);
+    return res.json({ success: true, user });
   } catch (error: any) {
     console.error("User registration sync failed:", error);
     return res.status(500).json({ error: "Failed to synchronize user session." });
   }
 });
 
-// 2. Fetch All Cases: Retrieves full list of farmer diagnostic cases from Cloud SQL or Supabase
+// 2. Fetch All Cases: Retrieves full list of farmer diagnostic cases from Supabase
 app.get("/api/cases", async (req, res) => {
   try {
-    if (isSupabaseConfigured()) {
-      const result = await getSupabaseCases();
-      return res.json({ 
-        success: true, 
-        cases: result.cases, 
-        tablesNotCreated: result.tablesNotCreated 
-      });
-    }
-
-    try {
-      const casesList = await db.select().from(escalatedCases);
-      return res.json({ success: true, cases: casesList });
-    } catch (dbErr: any) {
-      console.warn("Drizzle database select failed, falling back to empty list:", dbErr.message);
-      return res.json({ success: true, cases: [], databaseError: true });
-    }
+    const result = await getSupabaseCases();
+    return res.json({ 
+      success: true, 
+      cases: result.cases, 
+      tablesNotCreated: result.tablesNotCreated 
+    });
   } catch (error: any) {
     console.error("Fetch cases failed:", error);
     return res.status(500).json({ error: "Failed to load escalated cases." });
   }
 });
 
-// 3. Upsert Case: Saves new diagnostic reports or updates existing agent responses
+// 3. Upsert Case: Saves new diagnostic reports or updates existing agent responses in Supabase
 app.post("/api/cases", async (req, res) => {
   try {
     const {
@@ -477,91 +442,22 @@ app.post("/api/cases", async (req, res) => {
       return res.status(400).json({ error: "Case ID is required." });
     }
 
-    if (isSupabaseConfigured()) {
-      const syncedCase = await upsertCaseToSupabase({
-        id,
-        districtId,
-        farmerName,
-        village,
-        cropName,
-        photoThumbnail,
-        diagnosis,
-        symptomDescription,
-        voiceTranscript,
-        submissionTime,
-        status,
-        advisoryResponse,
-        userUid
-      });
-      return res.json({ success: true, case: syncedCase });
-    }
-
-    try {
-      // Lookup corresponding primary key of user if they are logged in
-      let dbUserId: number | null = null;
-      if (userUid) {
-        const existingUsers = await db.select().from(users).where(eq(users.uid, userUid));
-        if (existingUsers.length > 0) {
-          dbUserId = existingUsers[0].id;
-        }
-      }
-
-      // Insert or update case details in Cloud SQL
-      const upserted = await db.insert(escalatedCases)
-        .values({
-          id,
-          userId: dbUserId,
-          districtId,
-          farmerName,
-          village,
-          cropName,
-          photoThumbnail,
-          diagnosis,
-          symptomDescription,
-          voiceTranscript,
-          submissionTime,
-          status,
-          advisoryResponse,
-        })
-        .onConflictDoUpdate({
-          target: escalatedCases.id,
-          set: {
-            status,
-            advisoryResponse,
-            farmerName,
-            village,
-            cropName,
-            photoThumbnail,
-            diagnosis,
-            symptomDescription,
-            voiceTranscript,
-            submissionTime,
-          }
-        })
-        .returning();
-
-      return res.json({ success: true, case: upserted[0] });
-    } catch (dbErr: any) {
-      console.warn("Drizzle database upsert failed, falling back to local-only:", dbErr.message);
-      // Return the payload with a databaseError flag
-      const mockSynced = {
-        id,
-        userId: null,
-        districtId,
-        farmerName,
-        village,
-        cropName,
-        photoThumbnail,
-        diagnosis,
-        symptomDescription,
-        voiceTranscript,
-        submissionTime,
-        status,
-        advisoryResponse,
-        createdAt: new Date().toISOString()
-      };
-      return res.json({ success: true, case: mockSynced, databaseError: true });
-    }
+    const syncedCase = await upsertCaseToSupabase({
+      id,
+      districtId,
+      farmerName,
+      village,
+      cropName,
+      photoThumbnail,
+      diagnosis,
+      symptomDescription,
+      voiceTranscript,
+      submissionTime,
+      status,
+      advisoryResponse,
+      userUid
+    });
+    return res.json({ success: true, case: syncedCase });
   } catch (error: any) {
     console.error("Upsert case failed:", error);
     return res.status(500).json({ error: "Failed to sync escalated case." });

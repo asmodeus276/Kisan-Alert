@@ -38,8 +38,7 @@ import { INITIAL_ESCALATED_CASES } from "./data/mockCases";
 import { EscalatedCase } from "./types";
 import VoiceInput from "./components/VoiceInput";
 import { DiagnosisResult } from "./types";
-import { signInWithPopup, signOut, onAuthStateChanged, User as FirebaseUser } from "firebase/auth";
-import { auth, googleAuthProvider } from "./lib/firebase.ts";
+import { supabase } from "./lib/supabaseClient.ts";
 
 // Get backend base URL from environment variables for Netlify/external deployments, avoiding misconfigured Supabase URLs
 const rawBackendUrl = import.meta.env.VITE_BACKEND_URL || "";
@@ -156,8 +155,8 @@ export default function App() {
   const [selectedCompareCrops, setSelectedCompareCrops] = useState<string[]>([]);
   const [isDistrictDetailsExpanded, setIsDistrictDetailsExpanded] = useState(false);
 
-  // Firebase Authentication States
-  const [user, setUser] = useState<FirebaseUser | null>(null);
+  // Authentication States
+  const [user, setUser] = useState<{ uid: string; email?: string; displayName?: string; photoURL?: string | null } | null>(null);
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -192,23 +191,64 @@ export default function App() {
     localStorage.setItem("rsk_escalated_cases", JSON.stringify(escalatedCases));
   }, [escalatedCases]);
 
-  // Track Firebase Auth session and synchronize with Postgres database
+  // Track Supabase Auth session and synchronize with database
   React.useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      if (currentUser) {
-        setUser(currentUser);
-        const token = await currentUser.getIdToken();
-        setAuthToken(token);
+    if (!supabase) {
+      console.warn("Supabase client is not initialized yet. Check your VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY variables.");
+      return;
+    }
+
+    // Get initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session && session.user) {
+        const u = session.user;
+        const mappedUser = {
+          uid: u.id,
+          email: u.email,
+          displayName: u.user_metadata?.full_name || u.user_metadata?.name || u.email,
+          photoURL: u.user_metadata?.avatar_url || null,
+        };
+        setUser(mappedUser);
+        setAuthToken(session.access_token);
+
+        // Sync with backend database
+        fetch(`${BACKEND_URL}/api/register`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${session.access_token}`
+          }
+        }).catch(err => console.error("Failed to register session with backend:", err));
+      } else {
+        setUser(null);
+        setAuthToken(null);
+      }
+    }).catch(err => {
+      console.error("Error retrieving Supabase session on startup:", err);
+    });
+
+    // Listen for auth state changes
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (session && session.user) {
+        const u = session.user;
+        const mappedUser = {
+          uid: u.id,
+          email: u.email,
+          displayName: u.user_metadata?.full_name || u.user_metadata?.name || u.email,
+          photoURL: u.user_metadata?.avatar_url || null,
+        };
+        setUser(mappedUser);
+        setAuthToken(session.access_token);
 
         try {
           await fetch(`${BACKEND_URL}/api/register`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${token}`
+              "Authorization": `Bearer ${session.access_token}`
             }
           });
-          console.log("Session successfully verified and synchronized to Cloud SQL.");
+          console.log("Session successfully verified and synchronized to database.");
         } catch (err) {
           console.error("Failed to register session with backend:", err);
         }
@@ -217,30 +257,55 @@ export default function App() {
         setAuthToken(null);
       }
     });
-    return () => unsubscribe();
+
+    return () => {
+      subscription.unsubscribe();
+    };
   }, []);
 
-  // Handle Google Sign-In with robust popup closure catching and domain verification guides
+  // Handle Google Sign-In with Supabase, or mock user sign-in when not configured
   const handleSignIn = async () => {
     setAuthError(null);
+    if (!supabase) {
+      // Log in with a demo expert user instantly so they can view and manage escalated farmer cases!
+      const mockUser = {
+        uid: "demo-expert-user-uid",
+        email: "vaibhav.thakur2719@gmail.com",
+        displayName: "Vaibhav Thakur (Govt Advisor)",
+        photoURL: null,
+      };
+      setUser(mockUser);
+      setAuthToken("demo-mock-token");
+      console.log("Logged in with Demo Expert User (Local Mode)");
+      return;
+    }
     try {
-      await signInWithPopup(auth, googleAuthProvider);
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: window.location.origin
+        }
+      });
+      if (error) throw error;
     } catch (err: any) {
-      if (err.code === "auth/popup-closed-by-user") {
-        console.warn("Sign-in popup was closed by the user before completion.");
-        setAuthError("Sign-in popup was closed before completion. Please try again.");
-      } else if (err.code === "auth/cancelled-popup-request") {
-        console.warn("Sign-in popup request was cancelled by a subsequent action.");
-      } else if (err.code === "auth/unauthorized-domain") {
-        console.error("Firebase Sign-In Error (unauthorized-domain):", err);
-        setAuthError(`Domain Not Authorized: This domain (${window.location.hostname}) has not been whitelisted in the Firebase Console. Go to: Firebase Console > Authentication > Settings > Authorized domains, and add "${window.location.hostname}" to allow Google Sign-In to function.`);
-      } else if (err.code === "auth/popup-blocked") {
-        console.warn("Sign-in popup was blocked by the browser.");
-        setAuthError("The sign-in popup was blocked by your browser. Please allow popups for this site and click Sign In again.");
-      } else {
-        console.error("Firebase Sign-In Error:", err);
-        setAuthError(err.message || "An unexpected error occurred during Google Sign-In.");
-      }
+      console.error("Supabase Sign-In Error:", err);
+      setAuthError(err.message || "An unexpected error occurred during Google Sign-In.");
+    }
+  };
+
+  // Handle Sign-Out with Supabase
+  const handleSignOut = async () => {
+    if (!supabase) {
+      setUser(null);
+      setAuthToken(null);
+      return;
+    }
+    try {
+      await supabase.auth.signOut();
+      setUser(null);
+      setAuthToken(null);
+    } catch (err) {
+      console.error("Failed to sign out:", err);
     }
   };
 
@@ -340,7 +405,7 @@ export default function App() {
             },
             body: JSON.stringify({
               ...newCase,
-              userUid: auth.currentUser?.uid || null
+              userUid: user?.uid || null
             })
           }).catch(err => console.error("Cloud SQL case auto-escalation sync failed:", err));
 
@@ -708,7 +773,7 @@ export default function App() {
                 </span>
                 <span className="h-3 w-px bg-emerald-200 hidden sm:inline"></span>
                 <button
-                  onClick={() => signOut(auth)}
+                  onClick={handleSignOut}
                   className="text-[10px] uppercase font-mono font-black text-emerald-600 hover:text-emerald-950 transition-colors cursor-pointer"
                   id="auth-logout-btn"
                 >
