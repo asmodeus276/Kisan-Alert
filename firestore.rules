@@ -1,0 +1,77 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 3. User Validation Helper
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+        (data.keys().size() == 2 || (data.keys().size() == 3 && 'createdAt' in data)) &&
+        data.uid == request.auth.uid &&
+        data.email is string &&
+        data.email.size() <= 256;
+    }
+
+    // 4. Case Validation Helper
+    function isValidCase(data) {
+      return data.keys().hasAll(['id', 'districtId', 'farmerName', 'village', 'cropName', 'symptomDescription', 'submissionTime', 'status']) &&
+        data.id is string && data.id.size() <= 128 &&
+        data.districtId is string && data.districtId.size() <= 64 &&
+        data.farmerName is string && data.farmerName.size() <= 128 &&
+        data.village is string && data.village.size() <= 128 &&
+        data.cropName is string && data.cropName.size() <= 128 &&
+        data.symptomDescription is string && data.symptomDescription.size() <= 2000 &&
+        data.submissionTime is string && data.submissionTime.size() <= 64 &&
+        data.status is string && data.status.size() <= 64 &&
+        (!('userUid' in data) || data.userUid == null || data.userUid == request.auth.uid);
+    }
+
+    // 5. Users Collection Rules
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isValidUser(incoming());
+      allow delete: if false;
+    }
+
+    // 6. Escalated Cases Collection Rules
+    match /escalatedCases/{caseId} {
+      allow read: if true; // Public reporting database
+      allow create: if isValidId(caseId) && isValidCase(incoming());
+      allow update: if (
+        isValidId(caseId) &&
+        existing().status != "Closed" && (
+          // Case author updates non-status fields
+          (existing().userUid == request.auth.uid && incoming().userUid == request.auth.uid && isValidCase(incoming()) &&
+           incoming().diff(existing()).affectedKeys().hasOnly(['farmerName', 'village', 'cropName', 'symptomDescription', 'voiceTranscript'])) ||
+          // Status or response dispatch (managed securely)
+          (isSignedIn() && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'advisoryResponse']))
+        )
+      );
+      allow delete: if false; // Cases are permanent records
+    }
+  }
+}
