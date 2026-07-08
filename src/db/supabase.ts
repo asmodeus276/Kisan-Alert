@@ -228,7 +228,7 @@ export async function upsertCaseToSupabase(caseData: any) {
   try {
     let dbUserId: number | null = null;
 
-    // Try lookup by Firebase Auth UID to find the internal primary ID
+    // Try lookup by Supabase Auth UID to find the internal primary ID
     if (caseData.userUid) {
       const { data: user, error: userError } = await supabase
         .from("users")
@@ -294,7 +294,7 @@ export async function upsertCaseToSupabase(caseData: any) {
       diagnosis: item.diagnosis,
       symptomDescription: item.symptom_description,
       voiceTranscript: item.voice_transcript,
-      submission_time: item.submission_time,
+      submissionTime: item.submission_time,
       status: item.status,
       advisoryResponse: item.advisory_response,
       createdAt: item.created_at,
@@ -311,5 +311,58 @@ export async function upsertCaseToSupabase(caseData: any) {
       return { tablesNotCreated: true };
     }
     throw err;
+  }
+}
+
+/**
+ * Resolves the owner's UID for a given case ID, and the current case status & advisory response if it exists.
+ */
+export async function getCaseOwnerAndStatus(id: string): Promise<{ ownerUid: string | null; status: string | null; advisoryResponse: string | null } | null> {
+  if (!supabase) {
+    const item = inMemoryCases.find(c => c.id === id);
+    if (!item) return null;
+    let ownerUid: string | null = null;
+    if (item.user_id !== null) {
+      const u = inMemoryUsers.find(x => x.id === item.user_id);
+      if (u) ownerUid = u.uid;
+    }
+    return {
+      ownerUid,
+      status: item.status,
+      advisoryResponse: item.advisory_response,
+    };
+  }
+
+  try {
+    const { data: caseItem, error: caseError } = await supabase
+      .from("escalated_cases")
+      .select("status, advisory_response, user_id")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (caseError || !caseItem) {
+      return null;
+    }
+
+    let ownerUid: string | null = null;
+    if (caseItem.user_id) {
+      const { data: userItem } = await supabase
+        .from("users")
+        .select("uid")
+        .eq("id", caseItem.user_id)
+        .maybeSingle();
+      if (userItem) {
+        ownerUid = userItem.uid;
+      }
+    }
+
+    return {
+      ownerUid,
+      status: caseItem.status,
+      advisoryResponse: caseItem.advisory_response,
+    };
+  } catch (err) {
+    console.error("Error getting case owner and status:", err);
+    return null;
   }
 }

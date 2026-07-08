@@ -13,6 +13,7 @@ import {
   syncUserToSupabase,
   getSupabaseCases,
   upsertCaseToSupabase,
+  getCaseOwnerAndStatus,
 } from "./src/db/supabase.ts";
 
 
@@ -420,7 +421,7 @@ app.get("/api/cases", async (req, res) => {
 });
 
 // 3. Upsert Case: Saves new diagnostic reports or updates existing agent responses in Supabase
-app.post("/api/cases", async (req, res) => {
+app.post("/api/cases", requireAuth, async (req: AuthRequest, res) => {
   try {
     const {
       id,
@@ -442,6 +443,51 @@ app.post("/api/cases", async (req, res) => {
       return res.status(400).json({ error: "Case ID is required." });
     }
 
+    const authenticatedUser = req.user!;
+    const isExpert = authenticatedUser.email === "vaibhav.thakur2719@gmail.com";
+
+    // 1. Fetch existing case to check ownership and existing fields (if it exists)
+    const existingCase = await getCaseOwnerAndStatus(id);
+
+    if (existingCase) {
+      // It's an UPDATE
+      const { ownerUid, status: currentStatus, advisoryResponse: currentAdvisoryResponse } = existingCase;
+
+      // Ensure the caller is either the case owner or an expert
+      if (!isExpert && ownerUid !== authenticatedUser.uid) {
+        return res.status(403).json({ error: "Forbidden: You are not authorized to update this case." });
+      }
+
+      // If a regular farmer is trying to change status or advisoryResponse
+      if (!isExpert) {
+        const incomingStatus = status || "Open";
+        const dbStatus = currentStatus || "Open";
+        if (incomingStatus !== dbStatus) {
+          return res.status(403).json({ error: "Forbidden: Regular farmers cannot change case status." });
+        }
+
+        const incomingAdvisory = advisoryResponse || "";
+        const dbAdvisory = currentAdvisoryResponse || "";
+        if (incomingAdvisory !== dbAdvisory) {
+          return res.status(403).json({ error: "Forbidden: Regular farmers cannot modify the expert advisory response." });
+        }
+      }
+    } else {
+      // It's a CREATE
+      // Regular farmers shouldn't set custom status or advisory responses on creation
+      if (!isExpert) {
+        if (status && status !== "Open") {
+          return res.status(403).json({ error: "Forbidden: New cases must have status set to 'Open'." });
+        }
+        if (advisoryResponse && advisoryResponse !== "") {
+          return res.status(403).json({ error: "Forbidden: New cases cannot have an advisory response." });
+        }
+      }
+    }
+
+    // Force the correct userUid for regular farmers to prevent spoofing
+    const finalUserUid = isExpert ? (userUid || authenticatedUser.uid) : authenticatedUser.uid;
+
     const syncedCase = await upsertCaseToSupabase({
       id,
       districtId,
@@ -453,9 +499,9 @@ app.post("/api/cases", async (req, res) => {
       symptomDescription,
       voiceTranscript,
       submissionTime,
-      status,
-      advisoryResponse,
-      userUid
+      status: isExpert ? status : (status || "Open"),
+      advisoryResponse: isExpert ? advisoryResponse : (advisoryResponse || ""),
+      userUid: finalUserUid
     });
     return res.json({ success: true, case: syncedCase });
   } catch (error: any) {
