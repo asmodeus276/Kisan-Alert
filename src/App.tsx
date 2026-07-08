@@ -82,6 +82,44 @@ const getDistrictPremiumMetrics = (district: any) => {
   };
 };
 
+const compressImage = (base64Str: string): Promise<string> => {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.src = base64Str;
+    img.onload = () => {
+      const maxDim = 1024;
+      let width = img.width;
+      let height = img.height;
+
+      if (width > maxDim || height > maxDim) {
+        if (width > height) {
+          height = Math.round((height * maxDim) / width);
+          width = maxDim;
+        } else {
+          width = Math.round((width * maxDim) / height);
+          height = maxDim;
+        }
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        resolve(base64Str);
+        return;
+      }
+
+      ctx.drawImage(img, 0, 0, width, height);
+      const compressedDataUrl = canvas.toDataURL("image/jpeg", 0.8);
+      resolve(compressedDataUrl);
+    };
+    img.onerror = () => {
+      resolve(base64Str);
+    };
+  });
+};
+
 export default function App() {
   // Selected state for district
   const [selectedDistrictId, setSelectedDistrictId] = useState(DISTRICTS[0].id);
@@ -129,6 +167,7 @@ export default function App() {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [symptomDescription, setSymptomDescription] = useState("");
+  const [selectedCropType, setSelectedCropType] = useState<string>("Rice");
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   
@@ -270,8 +309,8 @@ export default function App() {
       // Log in with a demo expert user instantly so they can view and manage escalated farmer cases!
       const mockUser = {
         uid: "demo-expert-user-uid",
-        email: "vaibhav.thakur2719@gmail.com",
-        displayName: "Vaibhav Thakur (Govt Advisor)",
+        email: "demo-expert@example.com",
+        displayName: "Demo Expert (Govt Advisor)",
         photoURL: null,
       };
       setUser(mockUser);
@@ -361,6 +400,7 @@ export default function App() {
 
           // Deduce crop name using keywords from diagnosis or description
           const deduceCropName = (disName: string, desc: string): string => {
+            if (selectedCropType) return selectedCropType;
             const text = `${disName} ${desc}`.toLowerCase();
             if (text.includes("potato")) return "Potato";
             if (text.includes("tomato")) return "Tomato";
@@ -427,6 +467,17 @@ export default function App() {
     setDiagnosis(sample.presetDiagnosis);
     setAnalysisError(null);
     stopSpeaking();
+
+    const ct = sample.cropType.toLowerCase();
+    if (ct.includes("rice") || ct.includes("paddy")) setSelectedCropType("Rice");
+    else if (ct.includes("potato")) setSelectedCropType("Potato");
+    else if (ct.includes("cotton")) setSelectedCropType("Cotton");
+    else if (ct.includes("tomato")) setSelectedCropType("Tomato");
+    else if (ct.includes("wheat")) setSelectedCropType("Wheat");
+    else if (ct.includes("sugarcane")) setSelectedCropType("Sugarcane");
+    else if (ct.includes("turmeric")) setSelectedCropType("Turmeric");
+    else if (ct.includes("grapes") || ct.includes("grape")) setSelectedCropType("Grapes");
+    else if (ct.includes("pigeon pea")) setSelectedCropType("Pigeon Pea");
   };
 
   // File conversion to base64 for API
@@ -519,14 +570,25 @@ export default function App() {
     stopSpeaking();
 
     try {
+      const isSvg = selectedImage.startsWith("data:image/svg+xml") || selectedImage.includes("<svg");
+      let imageToSend = selectedImage;
+      if (!isSvg) {
+        try {
+          imageToSend = await compressImage(selectedImage);
+        } catch (err) {
+          console.error("Error compressing image, using original:", err);
+        }
+      }
+
       const response = await fetch(`${BACKEND_URL}/api/analyze`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          image: selectedImage,
+          image: imageToSend,
           textDescription: symptomDescription,
+          cropType: selectedCropType,
         }),
       });
 
@@ -656,7 +718,21 @@ export default function App() {
       if (!response.ok) {
         // Handle the specific 412 code or custom missing key warning gracefully
         const errorMsg = data.error || "Failed to send SMS.";
-        const errorDetails = data.details ? ` (${data.details})` : "";
+        let errorDetails = "";
+        if (data.details) {
+          if (typeof data.details === "string") {
+            errorDetails = ` (${data.details})`;
+          } else if (typeof data.details === "object" && data.details !== null) {
+            try {
+              const innerMsg = data.details.message || data.details.error || JSON.stringify(data.details);
+              errorDetails = ` (${innerMsg})`;
+            } catch (e) {
+              errorDetails = ` (${String(data.details)})`;
+            }
+          } else {
+            errorDetails = ` (${String(data.details)})`;
+          }
+        }
         throw new Error(`${errorMsg}${errorDetails}`);
       }
 
@@ -2501,6 +2577,28 @@ CREATE TABLE IF NOT EXISTS escalated_cases (
                   <p className="text-[10px] text-stone-400 mt-2 text-center">
                     Accepted formats: JPG, PNG, WEBP. Max 5MB file.
                   </p>
+                </div>
+
+                {/* Crop Type Selection */}
+                <div className="bg-white rounded-3xl border border-stone-200 p-5 shadow-sm" id="crop-type-selection-bento">
+                  <span className="text-xs font-black text-stone-400 tracking-widest uppercase font-mono mb-3 block">1.5 Select Crop Type</span>
+                  <div className="grid grid-cols-3 gap-2">
+                    {["Rice", "Wheat", "Cotton", "Sugarcane", "Tomato", "Potato", "Turmeric", "Grapes", "Pigeon Pea"].map((crop) => (
+                      <button
+                        key={crop}
+                        type="button"
+                        onClick={() => setSelectedCropType(crop)}
+                        className={`py-2 px-3 rounded-xl text-xs font-bold border transition-all ${
+                          selectedCropType === crop
+                            ? "bg-emerald-100 text-emerald-800 border-emerald-300 shadow-sm"
+                            : "bg-stone-50 text-stone-600 border-stone-200 hover:bg-stone-100"
+                        }`}
+                        id={`crop-type-btn-${crop.toLowerCase().replace(" ", "-")}`}
+                      >
+                        {crop}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {/* 2. Symptom Description (Text or Voice dictation) */}

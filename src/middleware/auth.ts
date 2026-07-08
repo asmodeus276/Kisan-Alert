@@ -24,7 +24,7 @@ export const requireAuth = async (
       // In sandbox/development mock mode when Supabase is not configured, automatically authorize as an expert user
       req.user = {
         uid: "demo-expert-user-uid",
-        email: "vaibhav.thakur2719@gmail.com",
+        email: "demo-expert@example.com",
       };
       return next();
     }

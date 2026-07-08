@@ -53,13 +53,13 @@ ALTER TABLE escalated_cases ENABLE ROW LEVEL SECURITY;
 ### Helper Functions
 
 #### `is_expert()`
-Identifies if the current user is an authorized agricultural expert. In our environment, experts are identified by the authenticated user's email address (e.g., `vaibhav.thakur2719@gmail.com`).
+Identifies if the current user is an authorized agricultural expert. In our environment, experts are identified by the authenticated user's email address (e.g., `vaibhav.thakur2719@gmail.com` or `demo-expert@example.com`).
 ```sql
 CREATE OR REPLACE FUNCTION is_expert()
 RETURNS BOOLEAN SECURITY DEFINER AS $$
 BEGIN
   RETURN (
-    auth.jwt() ->> 'email' = 'vaibhav.thakur2719@gmail.com'
+    auth.jwt() ->> 'email' IN ('vaibhav.thakur2719@gmail.com', 'demo-expert@example.com')
   );
 END;
 $$ LANGUAGE plpgsql;
