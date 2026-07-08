@@ -191,6 +191,8 @@ export default function App() {
   const [recDistrictData, setRecDistrictData] = useState<any>(null);
   const [isRecLoading, setIsRecLoading] = useState(false);
   const [recError, setRecError] = useState<string | null>(null);
+  const [recIsCached, setRecIsCached] = useState<boolean>(false);
+  const [recIsFallback, setRecIsFallback] = useState<boolean>(false);
   const [selectedCompareCrops, setSelectedCompareCrops] = useState<string[]>([]);
   const [isDistrictDetailsExpanded, setIsDistrictDetailsExpanded] = useState(false);
 
@@ -660,13 +662,15 @@ export default function App() {
     setIsRecLoading(true);
     setRecError(null);
     try {
-      const res = await fetch(`${BACKEND_URL}/api/crop-recommendations`);
+      const res = await fetch(`${BACKEND_URL}/api/crop-recommendations?districtId=${selectedDistrictId}`);
       if (!res.ok) {
         throw new Error("Failed to load crop recommendations.");
       }
       const data = await res.json();
       setRecommendations(data.recommendations || []);
       setRecDistrictData(data.districtData);
+      setRecIsCached(!!data.isCached);
+      setRecIsFallback(!!data.isFallback);
     } catch (err: any) {
       setRecError(err.message || "An unexpected error occurred.");
     } finally {
@@ -675,10 +679,10 @@ export default function App() {
   };
 
   React.useEffect(() => {
-    if (activeTab === "recommend" && recommendations.length === 0) {
+    if (activeTab === "recommend") {
       fetchRecommendations();
     }
-  }, [activeTab]);
+  }, [activeTab, selectedDistrictId]);
 
   // Send active district hazard alert via Fast2SMS SMS API
   const handleSendSMSAlert = async (alert: any) => {
@@ -2101,6 +2105,20 @@ CREATE TABLE IF NOT EXISTS escalated_cases (
                   <p className="text-stone-500 mt-1 text-sm leading-relaxed">
                     AI-powered predictions optimized for local soil, satellite vegetation health indices, and seasonal weather forecasts.
                   </p>
+                  <div className="flex flex-wrap gap-2 mt-3" id="rec-cache-badge-container">
+                    {recIsCached && (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-extrabold bg-blue-50 text-blue-800 border border-blue-200 uppercase tracking-widest font-mono">
+                        <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>
+                        Cached Result (24h)
+                      </span>
+                    )}
+                    {recIsFallback && (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-extrabold bg-amber-50 text-amber-800 border border-amber-200 uppercase tracking-widest font-mono">
+                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                        Regional Backup Default
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <button
                   onClick={fetchRecommendations}

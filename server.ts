@@ -658,20 +658,61 @@ app.get("/api/weather", async (req, res) => {
   }
 });
 
+// Map of available districts to names and states for telemetry overrides
+const DISTRICT_MAP: Record<string, { name: string; state: string; lat: number; lon: number }> = {
+  muzaffarnagar: { name: "Muzaffarnagar", state: "Uttar Pradesh", lat: 29.4727, lon: 77.7085 },
+  nizamabad: { name: "Nizamabad", state: "Telangana", lat: 18.6725, lon: 78.0941 },
+  guntur: { name: "Guntur", state: "Andhra Pradesh", lat: 16.3067, lon: 80.4365 },
+  nashik: { name: "Nashik", state: "Maharashtra", lat: 19.9975, lon: 73.7898 },
+  bhatinda: { name: "Bhatinda", state: "Punjab", lat: 30.2110, lon: 74.9455 },
+  warangal: { name: "Warangal", state: "Telangana", lat: 17.9784, lon: 79.5941 }
+};
+
+interface CacheEntry {
+  data: {
+    districtData: any;
+    recommendations: any[];
+  };
+  timestamp: number;
+}
+
+const cropRecommendationsCache = new Map<string, CacheEntry>();
+
 // Crop Recommendations API Endpoint
 app.get("/api/crop-recommendations", async (req, res) => {
+  const districtId = ((req.query.districtId as string) || "warangal").toLowerCase();
+  const mapped = DISTRICT_MAP[districtId] || DISTRICT_MAP.warangal;
+
+  // 1. Check Cache (less than 24 hours old)
+  const cached = cropRecommendationsCache.get(districtId);
+  const now = Date.now();
+  if (cached && (now - cached.timestamp < 24 * 60 * 60 * 1000)) {
+    console.log(`[Cache Hit] Serving cached crop recommendations for district: ${districtId}`);
+    return res.json({
+      districtData: cached.data.districtData,
+      recommendations: cached.data.recommendations,
+      isCached: true,
+      isFallback: false
+    });
+  }
+
+  let districtData: any = null;
   try {
     const dataPath = path.join(process.cwd(), "mock-district-data.json");
     const fileContent = await fs.readFile(dataPath, "utf8");
-    const districtData = JSON.parse(fileContent);
+    districtData = JSON.parse(fileContent);
+
+    // Override district and state with correct mapped values so the UI is perfectly accurate
+    districtData.district = mapped.name;
+    districtData.state = mapped.state;
 
     // Try to enrich district weather with live weather forecast
     const apiKey = getOpenWeatherApiKey();
     if (apiKey) {
       try {
-        const liveForecast = await fetchLiveWeather(17.9784, 79.5941); // Warangal
+        const liveForecast = await fetchLiveWeather(mapped.lat, mapped.lon);
         districtData.weather_forecast_7day = liveForecast;
-        console.log("Successfully enriched mock-district-data.json with live OpenWeatherMap forecast.");
+        console.log(`Successfully enriched ${mapped.name} with live OpenWeatherMap forecast.`);
       } catch (weatherErr: any) {
         console.log("Enrichment bypassed (live weather API lookup skipped):", weatherErr.message);
       }
@@ -750,16 +791,244 @@ Provide recommendations matching the requested schema. Make sure the 'explanatio
     }
 
     const recommendations = JSON.parse(rawText.trim());
+
+    // Cache the successfully generated result
+    cropRecommendationsCache.set(districtId, {
+      data: {
+        districtData,
+        recommendations: recommendations.crops
+      },
+      timestamp: Date.now()
+    });
+
     return res.json({
       districtData,
-      recommendations: recommendations.crops
+      recommendations: recommendations.crops,
+      isCached: false,
+      isFallback: false
     });
 
   } catch (error: any) {
-    console.error("Crop recommendations generation error:", error);
-    return res.status(500).json({
-      error: "Failed to generate crop recommendations.",
-      details: error.message || "Unknown error"
+    console.error(`Crop recommendations generation error for ${mapped.name}:`, error);
+
+    // Ensure we have a default districtData object even if loading/parsing mock-district-data.json failed
+    if (!districtData) {
+      districtData = {
+        district: mapped.name,
+        state: mapped.state,
+        season: "Kharif",
+        ndvi: { value: 0.45, label: "Normal growth" },
+        soil: { type: "Sandy loam", ph: 6.5, n_level: "Medium", p_level: "Medium", k_level: "Medium" },
+        groundwater_depth_m: 10,
+        weather_forecast_7day: []
+      };
+    }
+
+    // 2.a If there is ANY cached result (even older than 24 hours), return it
+    const staleCached = cropRecommendationsCache.get(districtId);
+    if (staleCached) {
+      console.log(`[Cache Fallback] Serving STALE cached crop recommendations for district: ${districtId}`);
+      return res.json({
+        districtData: staleCached.data.districtData,
+        recommendations: staleCached.data.recommendations,
+        isCached: true,
+        isFallback: false,
+        staleReason: error.message || "API Error"
+      });
+    }
+
+    // 2.b Fallback to static, pre-defined, regional recommendations matching the schema
+    console.log(`[Static Fallback] Serving pre-defined regional recommendations for district: ${districtId}`);
+    let fallbackCrops = [];
+
+    if (districtId === "muzaffarnagar") {
+      fallbackCrops = [
+        {
+          name: "Sugarcane (Co 0238)",
+          local_name: "गन्ना (Co 0238)",
+          yield_per_acre: "350-400 Quintals",
+          water_need_mm: 1500,
+          sowing_window: "Feb-Apr (Spring) or Oct-Nov (Autumn)",
+          income_estimate_inr: 120000,
+          risk_level: "Low",
+          explanation_en: "Muzaffarnagar is the heart of India's sugarcane belt. Sowing high-yield Co 0238 variety with proper row spacing and timely weeding ensures stable, high-value returns backed by nearby sugar mills.",
+          explanation_local: "मुजफ्फरनगर भारत के गन्ना क्षेत्र का प्रमुख केंद्र है। उच्च उपज देने वाली को 0238 किस्म को उचित दूरी पर बोने और समय पर खरपतवार निकालने से चीनी मिलों के समर्थन के साथ स्थिर और उच्च आय सुनिश्चित होती है।"
+        },
+        {
+          name: "Wheat (HD 2967)",
+          local_name: "गेहूं (HD 2967)",
+          yield_per_acre: "22-25 Quintals",
+          water_need_mm: 400,
+          sowing_window: "Nov-Dec (Rabi)",
+          income_estimate_inr: 50000,
+          risk_level: "Low",
+          explanation_en: "Highly stable Rabi crop matching regional alluvial soil. Resistant to stripe rust, HD 2967 responds exceptionally well to 4-5 timed irrigations and balanced NPK fertilizer application.",
+          explanation_local: "क्षेत्र की जलोढ़ मिट्टी के अनुकूल अत्यधिक स्थिर रबी फसल। पीला रतवा प्रतिरोधी HD 2967 किस्म ४-५ बार समय पर सिंचाई और संतुलित एनपीके खाद के साथ शानदार उपज देती है।"
+        },
+        {
+          name: "Mustard (Pusa Mustard 30)",
+          local_name: "सरसों (पूसा सरसों 30)",
+          yield_per_acre: "8-10 Quintals",
+          water_need_mm: 250,
+          sowing_window: "Oct-Nov",
+          income_estimate_inr: 45000,
+          risk_level: "Medium",
+          explanation_en: "Low water requirement crop perfect as a cash crop following early paddy or as an intercrop. Susceptible to aphids, requiring proactive pest management.",
+          explanation_local: "कम पानी की आवश्यकता वाली उत्कृष्ट नकदी फसल, जो धान की अगेती कटाई के बाद या सह-फसल के रूप में उपयुक्त है। माहू (चेपा) कीट के प्रति संवेदनशील होने के कारण समय पर कीटनाशक आवश्यक है।"
+        }
+      ];
+    } else if (districtId === "nashik") {
+      fallbackCrops = [
+        {
+          name: "Grapes (Thompson Seedless)",
+          local_name: "अंगूर (थॉमसन सीडलेस)",
+          yield_per_acre: "12-15 Tons",
+          water_need_mm: 600,
+          sowing_window: "Oct-Nov (Pruning)",
+          income_estimate_inr: 250000,
+          risk_level: "High",
+          explanation_en: "Nashik is the grape capital of India. Growing Thompson Seedless on dogridge rootstocks with drip irrigation and proactive powdery/downy mildew monitoring yields high export premium.",
+          explanation_local: "नाशिक भारत की अंगूर राजधानी है। डॉगरिज रूटस्टॉक पर थॉमसन सीडलेस किस्म को ड्रिप सिंचाई और डाउनी मिल्ड्यू की समय पर निगरानी के साथ उगाना निर्यात के लिए उच्च मूल्य सुनिश्चित करता है।"
+        },
+        {
+          name: "Onion (N-2-4-1)",
+          local_name: "प्याज (एन-२-४-१)",
+          yield_per_acre: "120-140 Quintals",
+          water_need_mm: 450,
+          sowing_window: "Oct-Nov (Rabi)",
+          income_estimate_inr: 80000,
+          risk_level: "Medium",
+          explanation_en: "Rabi onion is highly stored-stable. Good soil drainage, organic matter enrichment, and treating seedlings with fungicides prevents purple blotch disease.",
+          explanation_local: "रबी प्याज भंडारण के लिए अत्यधिक उपयुक्त है। अच्छी जलनिकासी, जैविक खाद का उपयोग, और रोपाई से पहले फफूंदनाशक उपचार से बैंगनी धब्बा रोग से बचाव होता है।"
+        },
+        {
+          name: "Sorghum / Jowar (CSH 16)",
+          local_name: "ज्वार (CSH 16)",
+          yield_per_acre: "14-16 Quintals",
+          water_need_mm: 350,
+          sowing_window: "Jun-Jul (Kharif) or Oct-Nov (Rabi)",
+          income_estimate_inr: 35000,
+          risk_level: "Low",
+          explanation_en: "Drought-tolerant dual-purpose crop providing both grain and nutritious fodder. Well-suited for shallow medium-black soils of Maharashtra.",
+          explanation_local: "सूखा सहन करने वाली दोहरी उपयोग की फसल जो अनाज और पौष्टिक चारा दोनों प्रदान करती है। महाराष्ट्र की उथली मध्यम-काली मिट्टी के लिए अत्यधिक उपयुक्त।"
+        }
+      ];
+    } else if (districtId === "bhatinda") {
+      fallbackCrops = [
+        {
+          name: "Wheat (PBW 343)",
+          local_name: "गेहूं (PBW 343)",
+          yield_per_acre: "22-26 Quintals",
+          water_need_mm: 400,
+          sowing_window: "Nov-Dec (Rabi)",
+          income_estimate_inr: 55000,
+          risk_level: "Low",
+          explanation_en: "Highly responsive wheat variety for irrigated soils of Punjab. Timely sowing, laser land leveling, and nitrogen monitoring using leaf color charts ensure maximum grain filling.",
+          explanation_local: "पंजाब की सिंचित मिट्टी के लिए अत्यधिक उत्तरदायी गेहूं की किस्म। समय पर बुवाई, लेजर भूमि समतलीकरण, और नाइट्रोजन की निगरानी से अधिकतम दानों का भराव होता है।"
+        },
+        {
+          name: "Cotton (Bt Cotton)",
+          local_name: "कपास (बीटी कॉटन)",
+          yield_per_acre: "9-11 Quintals",
+          water_need_mm: 650,
+          sowing_window: "May-Jun (Kharif)",
+          income_estimate_inr: 70000,
+          risk_level: "Medium",
+          explanation_en: "Bhatinda is a prime cotton growing belt. Demands well-drained loamy soil, balanced potash fertilization to prevent wilt, and monitoring for whitefly pests during warm dry phases.",
+          explanation_local: "बठिंडा एक प्रमुख कपास उत्पादक क्षेत्र है। इसके लिए अच्छी जल निकासी वाली दोमट मिट्टी, विल्ट रोग से बचाव के लिए संतुलित पोटाश, और शुष्क मौसम में सफेद मक्खी की निगरानी आवश्यक है।"
+        },
+        {
+          name: "Maize (PMH 1)",
+          local_name: "मक्का (PMH 1)",
+          yield_per_acre: "20-24 Quintals",
+          water_need_mm: 500,
+          sowing_window: "Jun-Jul",
+          income_estimate_inr: 45000,
+          risk_level: "Medium",
+          explanation_en: "Highly productive hybrid maize suitable for Punjab plains. Requires rich nitrogen doses and proper drainage to avoid waterlogging stress.",
+          explanation_local: "पंजाब के मैदानी इलाकों के लिए उपयुक्त अत्यधिक उत्पादक हाइब्रिड मक्का। इसके लिए प्रचुर नाइट्रोजन खाद और जलजमाव से बचने के लिए जल निकासी की उचित व्यवस्था आवश्यक है।"
+        }
+      ];
+    } else if (districtId === "guntur") {
+      fallbackCrops = [
+        {
+          name: "Chili (Guntur Sannam - S4)",
+          local_name: "मिर्ची (गुंटूर सन्नम - S4)",
+          yield_per_acre: "15-18 Quintals",
+          water_need_mm: 800,
+          sowing_window: "Aug-Oct",
+          income_estimate_inr: 180000,
+          risk_level: "High",
+          explanation_en: "Guntur is world-renowned for its chili. Sannam varieties fetch high prices in domestic and export markets. Proactive management of leaf curl virus and thrips is crucial.",
+          explanation_local: "गुंटूर अपनी मिर्ची के लिए विश्व प्रसिद्ध है। सन्नम किस्मों को घरेलू और निर्यात बाजारों में उच्च मूल्य मिलता है। मरोड़िया रोग (लीफ कर्ल) और थ्रिप्स कीट का समय पर नियंत्रण आवश्यक है।"
+        },
+        {
+          name: "Cotton (BG-II Hybrid)",
+          local_name: "कपास (बीटी कॉटन)",
+          yield_per_acre: "10-12 Quintals",
+          water_need_mm: 700,
+          sowing_window: "Jun-Jul (Kharif)",
+          income_estimate_inr: 75000,
+          risk_level: "Medium",
+          explanation_en: "Black cotton soils of Guntur hold deep moisture and produce excellent quality long staple cotton fibers. Ensure balanced NPK application.",
+          explanation_local: "गुंटूर की काली मिट्टी नमी बनाए रखने में सक्षम है और उत्कृष्ट गुणवत्ता वाला लंबा रेशा कपास पैदा करती है। संतुलित एनपीके खाद का उपयोग करें।"
+        },
+        {
+          name: "Turmeric (Pragati)",
+          local_name: "हल्दी (प्रगति)",
+          yield_per_acre: "20-25 Quintals",
+          water_need_mm: 1100,
+          sowing_window: "Jun-Jul",
+          income_estimate_inr: 110000,
+          risk_level: "Low",
+          explanation_en: "A secure high-value crop suitable for well-drained loamy soils. High curcumin content varieties like Pragati are highly sought after by local processors.",
+          explanation_local: "अच्छी जल निकासी वाली दोमट मिट्टी के लिए उपयुक्त एक सुरक्षित और उच्च मूल्य वाली फसल। प्रगति जैसी उच्च करक्यूमिन सामग्री वाली किस्मों की स्थानीय स्तर पर भारी मांग है।"
+        }
+      ];
+    } else {
+      // Telangana/Warangal/Nizamabad and general default
+      fallbackCrops = [
+        {
+          name: "Rice / Paddy (Telangana Sona)",
+          local_name: "धान (तेलंगाना सोना)",
+          yield_per_acre: "24-28 Quintals",
+          water_need_mm: 1200,
+          sowing_window: "Jul-Aug (Kharif) or Nov-Dec (Rabi)",
+          income_estimate_inr: 65000,
+          risk_level: "Medium",
+          explanation_en: "Telangana Sona (RNR 15048) is super fine grain with low glycemic index and high yield. Suitable for irrigated land with proper zinc sulphate enrichment to prevent khaira disease.",
+          explanation_local: "तेलंगाना सोना (RNR 15048) सुपर फाइन दाने वाली, कम ग्लाइसेमिक इंडेक्स और उच्च उपज वाली किस्म है। खैरा रोग से बचाव के लिए जिंक सल्फेट के उचित उपयोग के साथ सिंचित भूमि के लिए उपयुक्त है।"
+        },
+        {
+          name: "Cotton (BG-II Hybrid)",
+          local_name: "कपास (बीटी कॉटन)",
+          yield_per_acre: "10-12 Quintals",
+          water_need_mm: 700,
+          sowing_window: "Jun-Jul (Kharif)",
+          income_estimate_inr: 75000,
+          risk_level: "Medium",
+          explanation_en: "Deep black and red gravelly soils of Telangana support hybrid cotton well. Proactive pheromone trapping for Pink Bollworm and sucking pests is critical to safeguard the yield.",
+          explanation_local: "तेलंगाना की गहरी काली और लाल बजरीली मिट्टी हाइब्रिड कपास के लिए अत्यंत उपयुक्त है। गुलाबी सुंडी और रस चूसने वाले कीटों से बचाव के लिए फेरोमोन ट्रैप का समय पर उपयोग बहुत आवश्यक है।"
+        },
+        {
+          name: "Pigeon Pea / Red Gram (PRG 176)",
+          local_name: "अरहर / तुअर (PRG 176)",
+          yield_per_acre: "6-8 Quintals",
+          water_need_mm: 450,
+          sowing_window: "Jun-Jul (Kharif)",
+          income_estimate_inr: 55000,
+          risk_level: "Low",
+          explanation_en: "Excellent drought-resistant legume crop. It fixes atmospheric nitrogen to restore soil fertility, and performs extremely well in red loamy soil with minimal supplemental irrigation.",
+          explanation_local: "सूखा सहन करने वाली उत्कृष्ट दलहन फसल। यह मिट्टी की उर्वरता बढ़ाने के लिए वायुमंडलीय नाइट्रोजन का स्थिरीकरण करती है और बहुत कम सिंचाई में भी लाल दोमट मिट्टी में अच्छी उपज देती है।"
+        }
+      ];
+    }
+
+    return res.json({
+      districtData,
+      recommendations: fallbackCrops,
+      isCached: false,
+      isFallback: true
     });
   }
 });
